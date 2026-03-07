@@ -6,7 +6,8 @@
 1. 打开ubuntu；
 2. 执行命令：
 ```bash
-docker-compose up -d
+cd /mnt/d/Develop/DocRAG/docs
+docker-compose -f docker-compose.yaml up -d
 ```
 
 ## 二、前端
