@@ -83,81 +83,96 @@ public class HybridSearchService {
 
             logger.debug("向量生成成功，开始执行混合搜索 KNN");
 
-// ... 仅展示 searchWithPermission 内部修改部分 ...
-
             SearchResponse<EsDocument> response = esClient.search(s -> {
                 s.index("knowledge_base");
-                int recallK = topK * 30;
-
-                // 1. KNN 路 (如果 queryName 报错，说明 ES Client 版本极低)
+                // KNN 召回
+                int recallK = topK * 30; // KNN 召回窗口
                 s.knn(kn -> kn
                         .field("vector")
                         .queryVector(queryVector)
                         .k(recallK)
                         .numCandidates(recallK)
-                        .queryName("knn_route") // 尝试使用 queryName，若还报错请确认 pom.xml 版本
-                        .filter(f -> f.bool(bf -> bf /* 权限逻辑不变 */))
-                );
-
-                // 2. 文本路
-                s.query(q -> q.bool(b -> b
-                        .must(mst -> mst.match(m -> m
-                                .field("textContent")
-                                .query(query)
-                                .queryName("text_route")
+                        .filter(f -> f.bool(bf -> bf
+                                // 条件1: 用户可访问自己的文档
+                                .should(s1 -> s1.term(t -> t.field("userId").value(userDbId)))
+                                // 条件2: 公开文档
+                                .should(s2 -> s2.term(t -> t.field("public").value(true)))
+                                // 条件3: 组织标签
+                                .should(s3 -> {
+                                    if (userEffectiveTags.isEmpty()) {
+                                        return s3.matchNone(mn -> mn);
+                                    } else if (userEffectiveTags.size() == 1) {
+                                        return s3.term(t -> t.field("orgTag").value(userEffectiveTags.get(0)));
+                                    } else {
+                                        return s3.bool(inner -> {
+                                            userEffectiveTags.forEach(tag -> inner.should(sh2 -> sh2.term(t -> t.field("orgTag").value(tag))));
+                                            return inner;
+                                        });
+                                    }
+                                })
                         ))
-                        .filter(f -> f.bool(bf -> bf /* 权限逻辑不变 */))
+                );
+                // 必须命中关键词 + 权限过滤
+                s.query(q -> q.bool(b -> b
+                        .must(mst -> mst.match(m -> m.field("textContent").query(query)))
+                        .filter(f -> f.bool(bf -> bf
+                                // 条件1: 用户可访问自己的文档
+                                .should(s1 -> s1.term(t -> t.field("userId").value(userDbId)))
+                                // 条件2: 公开文档
+                                .should(s2 -> s2.term(t -> t.field("public").value(true)))
+                                // 条件3: 组织标签
+                                .should(s3 -> {
+                                    if (userEffectiveTags.isEmpty()) {
+                                        return s3.matchNone(mn -> mn);
+                                    } else if (userEffectiveTags.size() == 1) {
+                                        return s3.term(t -> t.field("orgTag").value(userEffectiveTags.get(0)));
+                                    } else {
+                                        return s3.bool(inner -> {
+                                            userEffectiveTags.forEach(tag -> inner.should(sh2 -> sh2.term(t -> t.field("orgTag").value(tag))));
+                                            return inner;
+                                        });
+                                    }
+                                })
+                        ))
                 ));
 
-                // 3. RRF 融合
-                s.rank(rk -> rk.rrf(rrf -> rrf.windowSize(100).rankConstant(60)));
+                // 第二阶段 BM25 rescore
+                s.rescore(r -> r
+                        .windowSize(recallK)
+                        .query(rq -> rq
+                                .queryWeight(0.2d)               // 保留部分 KNN 分
+                                .rescoreQueryWeight(1.0d)        // BM25 主导
+                                .query(rqq -> rqq.match(m -> m
+                                        .field("textContent")
+                                        .query(query)
+                                        .operator(Operator.And)
+                                ))
+                        )
+                );
                 s.size(topK);
                 return s;
             }, EsDocument.class);
 
-            // 4. 解析结果 (处理 rank() 找不到和类型转换问题)
+            logger.debug("Elasticsearch查询执行完成，命中数量: {}, 最大分数: {}",
+                    response.hits().total().value(), response.hits().maxScore());
+
             List<SearchResult> results = response.hits().hits().stream()
                     .map(hit -> {
                         assert hit.source() != null;
-
-                        // 类型转换安全处理：将 Long 类型的 rank 转为 Integer
-                        Integer rankVal = null;
-                        try {
-                            if (hit.rank() != null) {
-                                rankVal = hit.rank().intValue();
-                            }
-                        } catch (Throwable t) {
-                            // 如果由于版本低找不到 rank() 方法，捕获异常防止崩溃
-                        }
-
-                        List<String> routes = hit.matchedQueries();
-
-                        // 获取来源路和排名
-                        List<String> routes = hit.matchedQueries();
-                        Integer rankVal = (hit.rank() != null) ? hit.rank().intValue() : null;
-
-                        // 补全内容记录，方便通过日志直接观察语义相关性
-                        String contentSnippet = hit.source().getTextContent() != null ?
-                                hit.source().getTextContent().substring(0, Math.min(50, hit.source().getTextContent().length())) : "";
-
-                        logger.debug("搜索命中 - ID: {}, 排名: {}, 来源路: {}, 内容摘要: {}...",
-                                hit.id(), rankVal, routes, contentSnippet);;
-
-                        // 调用 10 参数构造函数 (与 SearchResult.java 匹配)
+                        logger.debug("搜索结果 - 文件: {}, 块: {}, 分数: {}, 内容: {}",
+                                hit.source().getFileMd5(), hit.source().getChunkId(), hit.score(),
+                                hit.source().getTextContent().substring(0, Math.min(50, hit.source().getTextContent().length())));
                         return new SearchResult(
                                 hit.source().getFileMd5(),
                                 hit.source().getChunkId(),
                                 hit.source().getTextContent(),
                                 hit.score(),
-                                rankVal,      // rank 变量
-                                routes,       // sourceRoutes 变量
                                 hit.source().getUserId(),
                                 hit.source().getOrgTag(),
-                                hit.source().isPublic(),
-                                null          // fileName 初始为 null
+                                hit.source().isPublic()
                         );
                     })
-                    .collect(Collectors.toList()); // 解决 List<Object> 无法转换为 List<SearchResult> 的问题
+                    .toList();
 
             logger.debug("返回搜索结果数量: {}", results.size());
             attachFileNames(results);
