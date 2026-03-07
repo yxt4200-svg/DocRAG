@@ -24,7 +24,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @Service
-public class UploadService {
+public class
+UploadService {
 
     private static final Logger logger = LoggerFactory.getLogger(UploadService.class);
 
@@ -475,24 +476,31 @@ public class UploadService {
      * @return 文件的总分片数
      */
     public int getTotalChunks(String fileMd5, String userId) {
+        // 记录日志：开始计算文件总分片数
         logger.info("计算文件总分片数 => fileMd5: {}, userId: {}", fileMd5, userId);
         try {
+            // 根据文件MD5和用户ID查询文件上传记录
             Optional<FileUpload> fileUpload = fileUploadRepository.findByFileMd5AndUserId(fileMd5, userId);
-            
+
+            // 如果文件记录不存在，记录警告日志并返回0
             if (fileUpload.isEmpty()) {
                 logger.warn("文件记录不存在，无法计算分片数 => fileMd5: {}, userId: {}", fileMd5, userId);
                 return 0;
             }
-            
+
+            // 获取文件总大小
             long totalSize = fileUpload.get().getTotalSize();
-            // 默认每个分片5MB
-            int chunkSize = 5 * 1024 * 1024;
+            // 设置每个分片的大小为5MB（固定值）
+            int chunkSize = 5 * 1024 * 1024; // 5MB = 5 * 1024KB * 1024B
+            // 计算总分片数：总大小除以分片大小，向上取整
             int totalChunks = (int) Math.ceil((double) totalSize / chunkSize);
-            
-            logger.info("文件总分片数计算结果 => fileMd5: {}, userId: {}, totalSize: {}, chunkSize: {}, totalChunks: {}", 
-                      fileMd5, userId, totalSize, chunkSize, totalChunks);
+
+            // 记录计算结果日志
+            logger.info("文件总分片数计算结果 => fileMd5: {}, userId: {}, totalSize: {}, chunkSize: {}, totalChunks: {}",
+                    fileMd5, userId, totalSize, chunkSize, totalChunks);
             return totalChunks;
         } catch (Exception e) {
+            // 如果出现异常，记录错误日志并抛出运行时异常
             logger.error("计算文件总分片数失败 => fileMd5: {}, userId: {}, 错误: {}", fileMd5, userId, e.getMessage(), e);
             throw new RuntimeException("Failed to calculate total chunks", e);
         }
@@ -550,7 +558,8 @@ public class UploadService {
                 throw new RuntimeException(String.format(
                     "分片数量不匹配，期望: %d, 实际: %d", expectedChunks, chunks.size()));
             }
-            
+
+            // 从分片信息对象列表chunks中提取每个分片的存储路径storagePath
             List<String> partPaths = chunks.stream()
                     .map(ChunkInfo::getStoragePath)
                     .collect(Collectors.toList());
